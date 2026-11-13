@@ -328,6 +328,23 @@ function render() {
   renderHistory();
 }
 
+function decodeEntities(value) {
+  return value
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCharCode(parseInt(code, 16)))
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
+function usableTranslation(value) {
+  const clean = decodeEntities(value || '').trim();
+  if (!clean || /MYMEMORY WARNING|QUERY LENGTH LIMIT EXCEEDED|INVALID LANGUAGE PAIR/i.test(clean)) return '';
+  return clean;
+}
+
 async function translate(text, sl, tl) {
   const source = (sl || currentSource().translate).trim();
   const target = (tl || currentTarget().translate).trim();
@@ -337,23 +354,28 @@ async function translate(text, sl, tl) {
   const key = cacheKey(clean, source, target);
   if (cache.has(key)) return cache.get(key);
 
+  const url = `https://api.mymemory.translated.net/get?${new URLSearchParams({
+    q: clean,
+    langpair: `${source}|${target}`,
+  })}`;
   let response;
   try {
-    response = await fetch('/api/translate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ q: clean, sl: source, tl: target }),
-    });
+    response = await fetch(url);
   } catch {
-    throw new Error('無法連到翻譯服務。請在此資料夾執行 node server.mjs 後再開啟頁面。');
+    throw new Error('無法連到翻譯服務。請確認已連上網路。');
   }
 
   const data = await response.json().catch(() => ({}));
-  if (!response.ok || !data.translation) {
-    throw new Error(data.error || '翻譯服務暫時沒有回應');
+  const direct = usableTranslation(data?.responseData?.translatedText);
+  const match = (data?.matches || [])
+    .map((item) => usableTranslation(item?.translation))
+    .find(Boolean);
+  const translation = direct || match || '';
+  if (!response.ok || !translation) {
+    throw new Error('翻譯服務暫時沒有回應');
   }
-  remember(key, data.translation);
-  return data.translation;
+  remember(key, translation);
+  return translation;
 }
 
 function scheduleInterim(text, delay = 480) {
