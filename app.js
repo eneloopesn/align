@@ -7,6 +7,7 @@ const LANGS = [
   { id: 'es-ES', speech: 'es-ES', translate: 'es', tts: 'es-ES', label: 'Español', short: 'ES' },
   { id: 'fr-FR', speech: 'fr-FR', translate: 'fr', tts: 'fr-FR', label: 'Français', short: 'FR' },
   { id: 'de-DE', speech: 'de-DE', translate: 'de', tts: 'de-DE', label: 'Deutsch', short: 'DE' },
+  { id: 'pt-BR', speech: 'pt-BR', translate: 'pt', tts: 'pt-BR', label: 'Português (Brasil)', short: 'PT' },
   { id: 'vi-VN', speech: 'vi-VN', translate: 'vi', tts: 'vi-VN', label: 'Tiếng Việt', short: '越' },
   { id: 'th-TH', speech: 'th-TH', translate: 'th', tts: 'th-TH', label: 'ไทย', short: '泰' },
   { id: 'id-ID', speech: 'id-ID', translate: 'id', tts: 'id-ID', label: 'Indonesia', short: 'ID' },
@@ -339,10 +340,50 @@ function decodeEntities(value) {
     .replace(/&amp;/g, '&');
 }
 
-function usableTranslation(value) {
-  const clean = decodeEntities(value || '').trim();
-  if (!clean || /MYMEMORY WARNING|QUERY LENGTH LIMIT EXCEEDED|INVALID LANGUAGE PAIR/i.test(clean)) return '';
+function usable(text) {
+  const clean = (text || '').trim();
+  if (!clean) return '';
+  if (/MYMEMORY WARNING|QUERY LENGTH LIMIT EXCEEDED/i.test(clean)) return '';
   return clean;
+}
+
+async function translateGoogle(q, sl, tl) {
+  const url = `https://translate.googleapis.com/translate_a/single?${new URLSearchParams({
+    client: 'gtx',
+    sl,
+    tl,
+    dt: 't',
+    dj: '1',
+    q,
+  })}`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+  if (!res.ok) throw new Error(`Google 翻譯回應 ${res.status}`);
+  const data = await res.json();
+  let text = '';
+  if (data && Array.isArray(data.sentences)) {
+    text = data.sentences.map((sentence) => sentence.trans || '').join('');
+  } else if (Array.isArray(data?.[0])) {
+    text = data[0].map((part) => part?.[0] || '').join('');
+  }
+  text = usable(text);
+  if (!text) throw new Error('Google 翻譯沒有內容');
+  return text;
+}
+
+async function translateMemory(q, sl, tl) {
+  const url = `https://api.mymemory.translated.net/get?${new URLSearchParams({
+    q,
+    langpair: `${sl}|${tl}`,
+  })}`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+  if (!res.ok) throw new Error(`備用翻譯回應 ${res.status}`);
+  const data = await res.json();
+  const direct = usable(decodeEntities(data?.responseData?.translatedText || ''));
+  if (direct) return direct;
+  const match = (data?.matches || []).find((item) => usable(item?.translation));
+  const fallback = usable(decodeEntities(match?.translation || ''));
+  if (!fallback) throw new Error('備用翻譯沒有內容');
+  return fallback;
 }
 
 async function translate(text, sl, tl) {
@@ -351,28 +392,21 @@ async function translate(text, sl, tl) {
   const clean = text.trim();
   if (!clean) return '';
   if (source === target) return clean;
+  if (clean.length > 800) throw new Error('句子超過長度限制');
   const key = cacheKey(clean, source, target);
   if (cache.has(key)) return cache.get(key);
 
-  const url = `https://api.mymemory.translated.net/get?${new URLSearchParams({
-    q: clean,
-    langpair: `${source}|${target}`,
-  })}`;
-  let response;
+  let translation = '';
   try {
-    response = await fetch(url);
-  } catch {
-    throw new Error('無法連到翻譯服務。請確認已連上網路。');
-  }
-
-  const data = await response.json().catch(() => ({}));
-  const direct = usableTranslation(data?.responseData?.translatedText);
-  const match = (data?.matches || [])
-    .map((item) => usableTranslation(item?.translation))
-    .find(Boolean);
-  const translation = direct || match || '';
-  if (!response.ok || !translation) {
-    throw new Error('翻譯服務暫時沒有回應');
+    translation = await translateGoogle(clean, source, target);
+  } catch (error) {
+    console.error('[align] Google 翻譯失敗：', error.message);
+    try {
+      translation = await translateMemory(clean, source, target);
+    } catch (fallbackError) {
+      console.error('[align] 備用翻譯失敗：', fallbackError.message);
+      throw new Error('翻譯服務暫時無法連線');
+    }
   }
   remember(key, translation);
   return translation;
